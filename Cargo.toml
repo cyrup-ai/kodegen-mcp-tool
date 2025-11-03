@@ -7,7 +7,7 @@ license = "Apache-2.0 OR MIT"
 authors = ["KODEGEN.ᴀɪ"]
 homepage = "https://kodegen.ai"
 repository = "https://github.com/cyrup-ai/kodegen-mcp-tool"
-readme = "../../README.md"
+readme = "README.md"
 categories = ["development-tools", "command-line-utilities", "api-bindings"]
 keywords = [
     "mcp",

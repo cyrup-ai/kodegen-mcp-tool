@@ -1,6 +1,6 @@
 [package]
 name = "kodegen_mcp_tool"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "KODEGEN.ᴀɪ: Memory-efficient, Blazing-Fast, MCP tools for code generation agents."
 license = "Apache-2.0 OR MIT"
@@ -32,30 +32,30 @@ rmcp = { version = "0.8.3", features = [
 ]}
 
 # Async runtime (for tool_history)
-tokio = { version = "1.48", features = ["full"] }
+tokio = { version = "1", features = ["full"] }
 
 # Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 # Schema generation
-schemars = "1.0"
+schemars = "1"
 
 # Error handling
-thiserror = "2.0"
-anyhow = "1.0"
+thiserror = "2"
+anyhow = "1"
 
 # Synchronization primitives (for schema cache)
-parking_lot = "0.12.5"
+parking_lot = "0.12"
 
 # Date/time (for tool_history)
 chrono = { version = "0.4", features = ["serde"] }
 
 # Terminal colors (for tool_history)
-cyrup_termcolor = "2.0"
+cyrup_termcolor = "2"
 
 # Cross-platform paths (for tool_history)
-dirs = "6.0"
+dirs = "6"
 
 [lib]
 name = "kodegen_mcp_tool"

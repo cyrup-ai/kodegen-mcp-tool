@@ -1,5 +1,5 @@
 use rmcp::handler::server::tool::schema_for_type;
-use rmcp::model::{PromptArgument, PromptMessage};
+use rmcp::model::{Content, PromptArgument, PromptMessage};
 use schemars::JsonSchema;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -140,7 +140,7 @@ pub trait Tool: Send + Sync + Sized + 'static {
     fn execute(
         &self,
         args: Self::Args,
-    ) -> impl std::future::Future<Output = Result<Value, McpError>> + Send;
+    ) -> impl std::future::Future<Output = Result<Vec<Content>, McpError>> + Send;
 
     // ========================================================================
     // PROMPTING (Required - agents need this!)
@@ -190,7 +190,7 @@ pub trait Tool: Send + Sync + Sized + 'static {
     {
         use rmcp::handler::server::router::tool::ToolRoute;
         use rmcp::handler::server::wrapper::Parameters;
-        use rmcp::model::{CallToolResult, Content, Tool as RmcpTool, ToolAnnotations};
+        use rmcp::model::{CallToolResult, Tool as RmcpTool, ToolAnnotations};
         use std::sync::Arc;
 
         // Build annotations from trait methods
@@ -230,7 +230,10 @@ pub trait Tool: Send + Sync + Sized + 'static {
 
                 // Convert result to JSON for history (record both success and error)
                 let output_json = match &result {
-                    Ok(value) => value.clone(),
+                    Ok(contents) => serde_json::json!({
+                        "content_blocks": contents.len(),
+                        "preview": contents.first().map(|c| format!("{:?}", c))
+                    }),
                     Err(e) => serde_json::json!({
                         "error": e.to_string(),
                         "is_error": true
@@ -249,13 +252,11 @@ pub trait Tool: Send + Sync + Sized + 'static {
                     );
                 }
 
-                // Return result as normal
-                let result =
+                // Return formatted content directly
+                let contents =
                     result.map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
-                Ok(CallToolResult::success(vec![Content::text(
-                    result.to_string(),
-                )]))
+                Ok(CallToolResult::success(contents))
             }
         };
 
@@ -316,7 +317,7 @@ pub trait Tool: Send + Sync + Sized + 'static {
     {
         use rmcp::handler::server::router::tool::ToolRoute;
         use rmcp::handler::server::wrapper::Parameters;
-        use rmcp::model::{CallToolResult, Content, Tool as RmcpTool, ToolAnnotations};
+        use rmcp::model::{CallToolResult, Tool as RmcpTool, ToolAnnotations};
 
         // Build annotations from trait methods
         let annotations = ToolAnnotations::new()
@@ -355,7 +356,10 @@ pub trait Tool: Send + Sync + Sized + 'static {
 
                 // Convert result to JSON for history
                 let output_json = match &result {
-                    Ok(value) => value.clone(),
+                    Ok(contents) => serde_json::json!({
+                        "content_blocks": contents.len(),
+                        "preview": contents.first().map(|c| format!("{:?}", c))
+                    }),
                     Err(e) => serde_json::json!({
                         "error": e.to_string(),
                         "is_error": true
@@ -374,13 +378,11 @@ pub trait Tool: Send + Sync + Sized + 'static {
                     );
                 }
 
-                // Return result
-                let result =
+                // Return formatted content directly
+                let contents =
                     result.map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
-                Ok(CallToolResult::success(vec![Content::text(
-                    result.to_string(),
-                )]))
+                Ok(CallToolResult::success(contents))
             }
         };
 

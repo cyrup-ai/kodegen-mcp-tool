@@ -240,10 +240,8 @@ pub trait Tool: Send + Sync + Sized + 'static {
                     }),
                 };
 
-                // Record to history (exclude inspect_tool_calls to prevent recursion)
-                if Self::name() != "inspect_tool_calls"
-                    && let Some(history) = crate::tool_history::get_global_history()
-                {
+                // Record to history
+                if let Some(history) = crate::tool_history::get_global_history() {
                     history.add_call(
                         Self::name().to_string(),
                         args_json,
@@ -366,10 +364,8 @@ pub trait Tool: Send + Sync + Sized + 'static {
                     }),
                 };
 
-                // Record to history (exclude inspect_tool_calls to prevent recursion)
-                if Self::name() != "inspect_tool_calls"
-                    && let Some(history) = crate::tool_history::get_global_history()
-                {
+                // Record to history
+                if let Some(history) = crate::tool_history::get_global_history() {
                     history.add_call(
                         Self::name().to_string(),
                         args_json,

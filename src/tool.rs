@@ -7,6 +7,9 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+// Import log for schema validation logging
+use log;
+
 use crate::error::McpError;
 
 // ============================================================================
@@ -51,6 +54,40 @@ pub trait Tool: Send + Sync + Sized + 'static {
     // SCHEMA (Auto-generated with caching)
     // ========================================================================
 
+    /// Validate that schema generation works for this tool's Args type.
+    /// 
+    /// This method attempts to generate the JSON schema and catches any panics
+    /// that occur during schema generation. Should be called during tool 
+    /// registration to catch schema issues early.
+    ///
+    /// # Returns
+    /// - `Ok(())` if schema generation succeeds
+    /// - `Err(String)` with detailed error message if schema generation fails
+    fn validate_schema() -> Result<(), String> {
+        // Wrap schema_for_type in a panic catch
+        let result = std::panic::catch_unwind(|| {
+            let _ = schema_for_type::<Self::Args>();
+        });
+        
+        match result {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                let error_msg = if let Some(s) = e.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = e.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "Unknown panic during schema generation".to_string()
+                };
+                Err(format!(
+                    "Schema generation failed for tool '{}': {}",
+                    Self::name(),
+                    error_msg
+                ))
+            }
+        }
+    }
+
     /// Input schema - AUTO-GENERATED from Args type via `JsonSchema` derive
     /// Cached for performance - schema is computed once and reused
     #[inline]
@@ -63,6 +100,18 @@ pub trait Tool: Send + Sync + Sized + 'static {
         }
 
         // Slow path: generate and cache
+        // Log schema generation attempt
+        log::debug!("Generating schema for tool: {}", name);
+        
+        // Validate schema generation with panic catching
+        if let Err(e) = Self::validate_schema() {
+            log::error!("{}", e);
+            // For now, still proceed but with warning - could be made fatal in future
+            log::warn!("Tool '{}' registered with potentially invalid schema", name);
+        } else {
+            log::info!("✓ Schema generated successfully for tool: {}", name);
+        }
+        
         let schema = std::sync::Arc::new(schema_for_type::<Self::Args>());
         SCHEMA_CACHE.write().insert(name, schema.clone());
         schema
@@ -250,9 +299,8 @@ pub trait Tool: Send + Sync + Sized + 'static {
                     );
                 }
 
-                // Return formatted content directly
-                let contents =
-                    result.map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                // Return formatted content directly - use From<McpError> impl to preserve error types
+                let contents = result.map_err(rmcp::ErrorData::from)?;
 
                 Ok(CallToolResult::success(contents))
             }
@@ -374,9 +422,8 @@ pub trait Tool: Send + Sync + Sized + 'static {
                     );
                 }
 
-                // Return formatted content directly
-                let contents =
-                    result.map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                // Return formatted content directly - use From<McpError> impl to preserve error types
+                let contents = result.map_err(rmcp::ErrorData::from)?;
 
                 Ok(CallToolResult::success(contents))
             }

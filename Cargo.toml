@@ -1,6 +1,6 @@
 [package]
 name = "kodegen_mcp_tool"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 description = "KODEGEN.ᴀɪ: Memory-efficient, Blazing-Fast, MCP tools for code generation agents."
 license = "Apache-2.0 OR MIT"
@@ -33,6 +33,9 @@ rmcp = { version = "0.8", features = [
 
 # Async runtime (for tool_history)
 tokio = { version = "1", features = ["full"] }
+
+# Logging (for schema validation)
+log = "0.4"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

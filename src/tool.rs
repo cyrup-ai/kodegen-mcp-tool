@@ -258,6 +258,7 @@ pub trait Tool: Send + Sync + Sized + 'static {
             output_schema: Self::output_schema(),
             annotations: Some(annotations),
             icons: None,
+            meta: None,
         };
 
         // Wrap self in Arc for handler
@@ -381,6 +382,7 @@ pub trait Tool: Send + Sync + Sized + 'static {
             output_schema: Self::output_schema(),
             annotations: Some(annotations),
             icons: None,
+            meta: None,
         };
 
         // Use self directly (already Arc<Self>)

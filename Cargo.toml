@@ -1,6 +1,6 @@
 [package]
 name = "kodegen_mcp_tool"
-version = "0.2.3"
+version = "0.3.0"
 edition = "2024"
 description = "KODEGEN.ᴀɪ: Memory-efficient, Blazing-Fast, MCP tools for code generation agents."
 license = "Apache-2.0 OR MIT"
@@ -19,15 +19,15 @@ keywords = [
 
 [dependencies]
 # MCP SDK - for RMCP integration
-rmcp = { version = "0.8", features = [
-    "client", 
-    "schemars", 
-    "server", 
-    "transport-child-process", 
-    "transport-io", 
-    "transport-sse-client", 
-    "transport-sse-client-reqwest", 
-    "transport-streamable-http-client", 
+rmcp = { version = "0.9", features = [
+    "client",
+    "schemars",
+    "server",
+    "transport-child-process",
+    "transport-io",
+    "transport-sse-client",
+    "transport-sse-client-reqwest",
+    "transport-streamable-http-client",
     "transport-streamable-http-client-reqwest"
 ]}
 

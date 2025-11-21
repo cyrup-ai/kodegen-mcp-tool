@@ -189,6 +189,7 @@ pub trait Tool: Send + Sync + Sized + 'static {
     fn execute(
         &self,
         args: Self::Args,
+        ctx: ToolExecutionContext,
     ) -> impl std::future::Future<Output = Result<Vec<Content>, McpError>> + Send;
 
     // ========================================================================
@@ -238,8 +239,7 @@ pub trait Tool: Send + Sync + Sized + 'static {
         S: Send + Sync + 'static,
     {
         use rmcp::handler::server::router::tool::ToolRoute;
-        use rmcp::handler::server::wrapper::Parameters;
-        use rmcp::model::{CallToolResult, Tool as RmcpTool, ToolAnnotations};
+        use rmcp::model::{Tool as RmcpTool, ToolAnnotations};
         use std::sync::Arc;
 
         // Build annotations from trait methods
@@ -261,52 +261,12 @@ pub trait Tool: Send + Sync + Sized + 'static {
             meta: None,
         };
 
-        // Wrap self in Arc for handler
-        let tool = Arc::new(self);
-
-        // Handler captures the tool instance
-        let handler = move |Parameters(args): Parameters<Self::Args>| {
-            let tool = tool.clone();
-            async move {
-                let start = std::time::Instant::now();
-
-                // Serialize args before execute consumes them
-                let args_json =
-                    serde_json::to_value(&args).unwrap_or_else(|_| serde_json::json!({}));
-
-                // Execute tool
-                let result = tool.execute(args).await;
-                let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-
-                // Convert result to JSON for history (record both success and error)
-                let output_json = match &result {
-                    Ok(contents) => serde_json::json!({
-                        "content_blocks": contents.len(),
-                        "preview": contents.first().map(|c| format!("{:?}", c))
-                    }),
-                    Err(e) => serde_json::json!({
-                        "error": e.to_string(),
-                        "is_error": true
-                    }),
-                };
-
-                // Record to history
-                if let Some(history) = crate::tool_history::get_global_history() {
-                    history.add_call(
-                        Self::name().to_string(),
-                        args_json,
-                        output_json,
-                        Some(duration_ms),
-                    );
-                }
-
-                // Return formatted content directly - use From<McpError> impl to preserve error types
-                let contents = result.map_err(rmcp::ErrorData::from)?;
-
-                Ok(CallToolResult::success(contents))
-            }
+        // Create handler with ToolHandler wrapper (HRTB-compatible, zero-cost)
+        let handler = ToolHandler {
+            tool: Arc::new(self),
         };
 
+        // Use ToolRoute::new() - handles HRTB internally
         ToolRoute::new(metadata, handler)
     }
 
@@ -363,8 +323,7 @@ pub trait Tool: Send + Sync + Sized + 'static {
         S: Send + Sync + 'static,
     {
         use rmcp::handler::server::router::tool::ToolRoute;
-        use rmcp::handler::server::wrapper::Parameters;
-        use rmcp::model::{CallToolResult, Tool as RmcpTool, ToolAnnotations};
+        use rmcp::model::{Tool as RmcpTool, ToolAnnotations};
 
         // Build annotations from trait methods
         let annotations = ToolAnnotations::new()
@@ -385,52 +344,13 @@ pub trait Tool: Send + Sync + Sized + 'static {
             meta: None,
         };
 
-        // Use self directly (already Arc<Self>)
-        let tool = self;
-
-        // Handler captures the Arc<Tool>
-        let handler = move |Parameters(args): Parameters<Self::Args>| {
-            let tool = tool.clone(); // Cheap Arc clone
-            async move {
-                let start = std::time::Instant::now();
-
-                // Serialize args before execute consumes them
-                let args_json =
-                    serde_json::to_value(&args).unwrap_or_else(|_| serde_json::json!({}));
-
-                // Execute tool
-                let result = tool.execute(args).await;
-                let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-
-                // Convert result to JSON for history
-                let output_json = match &result {
-                    Ok(contents) => serde_json::json!({
-                        "content_blocks": contents.len(),
-                        "preview": contents.first().map(|c| format!("{:?}", c))
-                    }),
-                    Err(e) => serde_json::json!({
-                        "error": e.to_string(),
-                        "is_error": true
-                    }),
-                };
-
-                // Record to history
-                if let Some(history) = crate::tool_history::get_global_history() {
-                    history.add_call(
-                        Self::name().to_string(),
-                        args_json,
-                        output_json,
-                        Some(duration_ms),
-                    );
-                }
-
-                // Return formatted content directly - use From<McpError> impl to preserve error types
-                let contents = result.map_err(rmcp::ErrorData::from)?;
-
-                Ok(CallToolResult::success(contents))
-            }
+        // Create handler with ToolHandler wrapper (HRTB-compatible, zero-cost)
+        // Use self directly (already Arc<Self>) - no extra Arc allocation
+        let handler = ToolHandler {
+            tool: self,
         };
 
+        // Use ToolRoute::new() - handles HRTB internally
         ToolRoute::new(metadata, handler)
     }
 
@@ -477,5 +397,263 @@ pub trait Tool: Send + Sync + Sized + 'static {
         };
 
         PromptRoute::new(metadata, handler)
+    }
+}
+
+// ============================================================================
+// PROGRESS NOTIFICATION CONTEXT
+// ============================================================================
+
+/// Execution context provided to tools for progress notifications and cancellation.
+///
+/// Supports three patterns:
+/// 1. Stream text messages: `ctx.stream("output\n")`
+/// 2. Report numeric progress: `ctx.progress(50, 100)`  
+/// 3. Combined: `ctx.update(50, 100, "Processing file 50/100")`
+#[derive(Clone)]
+pub struct ToolExecutionContext {
+    /// Peer interface for sending progress notifications
+    peer: rmcp::service::Peer<rmcp::RoleServer>,
+    
+    /// Cancellation token (tool should check periodically)
+    ct: tokio_util::sync::CancellationToken,
+    
+    /// Unique request identifier (used for progress_token)
+    request_id: rmcp::model::RequestId,
+}
+
+impl ToolExecutionContext {
+    /// Create a new ToolExecutionContext with the given peer, cancellation token, and request ID.
+    ///
+    /// This constructor is public to allow custom integration contexts (e.g., bridging
+    /// to non-RMCP transports or in-process sessions). Most tools should not need to
+    /// call this directly - the context is typically provided by the RMCP framework.
+    ///
+    /// # Arguments
+    /// * `peer` - RMCP peer for sending progress notifications
+    /// * `ct` - Cancellation token for this execution
+    /// * `request_id` - Unique identifier for this request
+    #[must_use]
+    pub fn new(
+        peer: rmcp::service::Peer<rmcp::RoleServer>,
+        ct: tokio_util::sync::CancellationToken,
+        request_id: rmcp::model::RequestId,
+    ) -> Self {
+        Self {
+            peer,
+            ct,
+            request_id,
+        }
+    }
+
+    /// Stream a text message (for terminal output, logs, status updates).
+    ///
+    /// Use this for incrementally streaming text output as it becomes available.
+    ///
+    /// # Example
+    /// ```
+    /// // Terminal streaming command output
+    /// ctx.stream("npm info using npm@8.19.2\n").await.ok();
+    /// ctx.stream("added 234 packages in 15s\n").await.ok();
+    /// ```
+    pub async fn stream(&self, message: impl Into<String>) -> Result<(), McpError> {
+        self.notify_internal(0.0, None, Some(message.into())).await
+    }
+
+    /// Report numeric progress (for progress bars, counters).
+    ///
+    /// Use this when you have a known total and current progress value.
+    ///
+    /// # Example
+    /// ```
+    /// // Processing 50 out of 100 files
+    /// ctx.progress(50.0, 100.0).await.ok();
+    /// ```
+    pub async fn progress(&self, current: f64, total: f64) -> Result<(), McpError> {
+        self.notify_internal(current, Some(total), None).await
+    }
+
+    /// Report both numeric progress and a descriptive message.
+    ///
+    /// Use this when you want both a progress bar AND status text.
+    ///
+    /// # Example
+    /// ```
+    /// ctx.update(50.0, 100.0, "Generating embeddings 50/100").await.ok();
+    /// ```
+    pub async fn update(
+        &self,
+        current: f64,
+        total: f64,
+        message: impl Into<String>
+    ) -> Result<(), McpError> {
+        self.notify_internal(current, Some(total), Some(message.into())).await
+    }
+
+    /// Advanced: Full control over progress notification fields.
+    ///
+    /// Use this when you need fine-grained control (e.g., unknown total).
+    ///
+    /// # Example
+    /// ```
+    /// // Unknown total, just report current count
+    /// ctx.notify(lines_read as f64, None, Some("Reading file...")).await.ok();
+    /// ```
+    pub async fn notify(
+        &self,
+        progress: f64,
+        total: Option<f64>,
+        message: Option<String>
+    ) -> Result<(), McpError> {
+        self.notify_internal(progress, total, message).await
+    }
+
+    /// Internal implementation - sends the actual notification
+    async fn notify_internal(
+        &self,
+        progress: f64,
+        total: Option<f64>,
+        message: Option<String>
+    ) -> Result<(), McpError> {
+        use rmcp::model::{ProgressNotificationParam, ProgressToken, NumberOrString};
+
+        // Generate unique progress token from request ID
+        let progress_token = ProgressToken(NumberOrString::String(
+            format!("tool_{}", match &self.request_id {
+                NumberOrString::Number(n) => n.to_string(),
+                NumberOrString::String(s) => s.to_string(),
+            }).into()
+        ));
+
+        let params = ProgressNotificationParam {
+            progress_token,
+            progress,
+            total,
+            message,
+        };
+
+        self.peer
+            .notify_progress(params)
+            .await
+            .map_err(|e| McpError::Other(anyhow::anyhow!(
+                "Failed to send progress notification: {}", e
+            )))
+    }
+
+    /// Check if tool execution was cancelled by the client.
+    ///
+    /// Tools should check this periodically during long operations.
+    ///
+    /// # Example
+    /// ```
+    /// for item in items {
+    ///     if ctx.is_cancelled() {
+    ///         return Err(McpError::cancelled("Operation cancelled"));
+    ///     }
+    ///     process_item(item).await?;
+    /// }
+    /// ```
+    pub fn is_cancelled(&self) -> bool {
+        self.ct.is_cancelled()
+    }
+
+    /// Get the cancellation token for use with `tokio::select!` or custom logic.
+    pub fn cancellation_token(&self) -> &tokio_util::sync::CancellationToken {
+        &self.ct
+    }
+}
+
+// ============================================================================
+// FromContextPart implementation for ToolExecutionContext
+// ============================================================================
+
+impl<S> rmcp::handler::server::common::FromContextPart<rmcp::handler::server::tool::ToolCallContext<'_, S>> 
+    for ToolExecutionContext
+where
+    S: Send + Sync + 'static,
+{
+    fn from_context_part(
+        context: &mut rmcp::handler::server::tool::ToolCallContext<'_, S>
+    ) -> Result<Self, rmcp::ErrorData> {
+        Ok(ToolExecutionContext {
+            peer: context.request_context.peer.clone(),
+            ct: context.request_context.ct.clone(),
+            request_id: context.request_context.id.clone(),
+        })
+    }
+}
+
+// ============================================================================
+// ToolHandler - Zero-cost wrapper for CallToolHandler implementation
+// ============================================================================
+
+/// Wrapper struct that holds a tool and implements CallToolHandler.
+/// This enables HRTB-compatible tool routing without closure lifetime issues.
+struct ToolHandler<T: Tool> {
+    tool: Arc<T>,
+}
+
+impl<T: Tool> Clone for ToolHandler<T> {
+    fn clone(&self) -> Self {
+        Self {
+            tool: self.tool.clone(),
+        }
+    }
+}
+
+impl<T, S> rmcp::handler::server::tool::CallToolHandler<S, ()> for ToolHandler<T>
+where
+    T: Tool,
+    S: Send + Sync + 'static,
+{
+    fn call(
+        self,
+        mut context: rmcp::handler::server::tool::ToolCallContext<'_, S>,
+    ) -> futures::future::BoxFuture<'_, Result<rmcp::model::CallToolResult, rmcp::ErrorData>> {
+        use rmcp::handler::server::wrapper::Parameters;
+        use rmcp::handler::server::common::FromContextPart;
+        use rmcp::model::CallToolResult;
+        
+        Box::pin(async move {
+            let start = std::time::Instant::now();
+
+            // Extract arguments and execution context
+            let Parameters(args) = Parameters::<T::Args>::from_context_part(&mut context)?;
+            let exec_ctx = ToolExecutionContext::from_context_part(&mut context)?;
+
+            // Serialize args for history
+            let args_json = serde_json::to_value(&args)
+                .unwrap_or_else(|_| serde_json::json!({}));
+
+            // Execute tool
+            let result = self.tool.execute(args, exec_ctx).await;
+            let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+            // Convert result to JSON for history
+            let output_json = match &result {
+                Ok(contents) => serde_json::json!({
+                    "content_blocks": contents.len(),
+                    "preview": contents.first().map(|c| format!("{:?}", c))
+                }),
+                Err(e) => serde_json::json!({
+                    "error": e.to_string(),
+                    "is_error": true
+                }),
+            };
+
+            // Record to history
+            if let Some(history) = crate::tool_history::get_global_history() {
+                history.add_call(
+                    T::name().to_string(),
+                    args_json,
+                    output_json,
+                    Some(duration_ms),
+                );
+            }
+
+            // Return formatted content
+            let contents = result.map_err(rmcp::ErrorData::from)?;
+            Ok(CallToolResult::success(contents))
+        })
     }
 }

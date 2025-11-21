@@ -51,4 +51,4 @@ pub mod tool_history;
 
 // Re-export the main types for convenience
 pub use error::McpError;
-pub use tool::Tool;
+pub use tool::{Tool, ToolExecutionContext};

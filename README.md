@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="assets/img/banner.png" alt="Kodegen AI Banner" width="100%" />
+</div>
+
 # kodegen_mcp_tool
 
 > Memory-efficient, blazing-fast MCP tools for code generation agents.

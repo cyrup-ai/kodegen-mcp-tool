@@ -1,6 +1,6 @@
 [package]
 name = "kodegen_mcp_tool"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 description = "KODEGEN.ᴀɪ: Memory-efficient, Blazing-Fast, MCP tools for code generation agents."
 license = "Apache-2.0 OR MIT"
@@ -30,6 +30,9 @@ rmcp = { version = "0.9", features = [
     "transport-streamable-http-client",
     "transport-streamable-http-client-reqwest"
 ]}
+
+# HTTP types (for extracting headers from request::Parts)
+http = "1"
 
 # Async runtime (for tool_history)
 tokio = { version = "1", features = ["full"] }

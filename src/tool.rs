@@ -5,6 +5,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 // Import log for schema validation logging
@@ -414,12 +415,24 @@ pub trait Tool: Send + Sync + Sized + 'static {
 pub struct ToolExecutionContext {
     /// Peer interface for sending progress notifications
     peer: rmcp::service::Peer<rmcp::RoleServer>,
-    
+
     /// Cancellation token (tool should check periodically)
     ct: tokio_util::sync::CancellationToken,
-    
+
     /// Unique request identifier (used for progress_token)
     request_id: rmcp::model::RequestId,
+
+    /// Infrastructure context from kodegen stdio server (via HTTP headers)
+    /// These are None for non-HTTP transports
+
+    /// Connection ID - identifies the stdio connection instance
+    connection_id: Option<String>,
+
+    /// Current working directory from client environment
+    pwd: Option<PathBuf>,
+
+    /// Git repository root from client environment
+    git_root: Option<PathBuf>,
 }
 
 impl ToolExecutionContext {
@@ -443,7 +456,40 @@ impl ToolExecutionContext {
             peer,
             ct,
             request_id,
+            connection_id: None,
+            pwd: None,
+            git_root: None,
         }
+    }
+
+    /// Get connection ID from stdio server (for resource isolation)
+    /// Always present for kodegen stdio connections, None for direct HTTP clients
+    #[must_use]
+    pub fn connection_id(&self) -> Option<&str> {
+        self.connection_id.as_deref()
+    }
+
+    /// Get current working directory from client environment
+    #[must_use]
+    pub fn pwd(&self) -> Option<&std::path::Path> {
+        self.pwd.as_deref()
+    }
+
+    /// Get git repository root from client environment
+    #[must_use]
+    pub fn git_root(&self) -> Option<&std::path::Path> {
+        self.git_root.as_deref()
+    }
+
+    /// Get the request ID for this tool execution
+    ///
+    /// The request ID uniquely identifies this tool call and can be used for:
+    /// - Filtering events in multi-request scenarios
+    /// - Correlating logs and outputs
+    /// - Tracking execution history
+    #[must_use]
+    pub fn request_id(&self) -> &rmcp::model::RequestId {
+        &self.request_id
     }
 
     /// Stream a text message (for terminal output, logs, status updates).
@@ -567,7 +613,7 @@ impl ToolExecutionContext {
 // FromContextPart implementation for ToolExecutionContext
 // ============================================================================
 
-impl<S> rmcp::handler::server::common::FromContextPart<rmcp::handler::server::tool::ToolCallContext<'_, S>> 
+impl<S> rmcp::handler::server::common::FromContextPart<rmcp::handler::server::tool::ToolCallContext<'_, S>>
     for ToolExecutionContext
 where
     S: Send + Sync + 'static,
@@ -575,10 +621,36 @@ where
     fn from_context_part(
         context: &mut rmcp::handler::server::tool::ToolCallContext<'_, S>
     ) -> Result<Self, rmcp::ErrorData> {
+        // Extract HTTP request Parts (automatically injected by rmcp)
+        let parts = context.request_context.extensions.get::<http::request::Parts>();
+
+        // Extract kodegen headers from Parts
+        let (connection_id, pwd, git_root) = if let Some(parts) = parts {
+            let conn_id = parts.headers.get("x-kodegen-connection-id")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+
+            let pwd_val = parts.headers.get("x-kodegen-pwd")
+                .and_then(|v| v.to_str().ok())
+                .map(PathBuf::from);
+
+            let git_root_val = parts.headers.get("x-kodegen-gitroot")
+                .and_then(|v| v.to_str().ok())
+                .map(PathBuf::from);
+
+            (conn_id, pwd_val, git_root_val)
+        } else {
+            // Non-HTTP transport (direct stdio, child process)
+            (None, None, None)
+        };
+
         Ok(ToolExecutionContext {
             peer: context.request_context.peer.clone(),
             ct: context.request_context.ct.clone(),
             request_id: context.request_context.id.clone(),
+            connection_id,
+            pwd,
+            git_root,
         })
     }
 }

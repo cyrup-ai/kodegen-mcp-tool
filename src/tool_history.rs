@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use kodegen_config::KodegenConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::io::Write;
@@ -59,9 +60,8 @@ impl ToolHistory {
     /// Create new history manager and start background writer
     pub async fn new(instance_id: String) -> Self {
         // Determine history file location
-        let history_dir = dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("kodegen-mcp");
+        let history_dir = KodegenConfig::log_dir()
+            .unwrap_or_else(|_| PathBuf::from("logs"));
 
         // Create directory if needed (async)
         if let Err(e) = tokio::fs::create_dir_all(&history_dir).await {

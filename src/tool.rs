@@ -625,16 +625,18 @@ where
         let parts = context.request_context.extensions.get::<http::request::Parts>();
 
         // Extract kodegen headers from Parts
+        use kodegen_config::{X_KODEGEN_CONNECTION_ID, X_KODEGEN_PWD, X_KODEGEN_GITROOT};
+
         let (connection_id, pwd, git_root) = if let Some(parts) = parts {
-            let conn_id = parts.headers.get("mcp-session-id")
+            let conn_id = parts.headers.get(X_KODEGEN_CONNECTION_ID)
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string());
 
-            let pwd_val = parts.headers.get("x-kodegen-pwd")
+            let pwd_val = parts.headers.get(X_KODEGEN_PWD)
                 .and_then(|v| v.to_str().ok())
                 .map(PathBuf::from);
 
-            let git_root_val = parts.headers.get("x-kodegen-gitroot")
+            let git_root_val = parts.headers.get(X_KODEGEN_GITROOT)
                 .and_then(|v| v.to_str().ok())
                 .map(PathBuf::from);
 

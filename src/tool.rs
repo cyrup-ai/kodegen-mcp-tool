@@ -626,7 +626,7 @@ where
 
         // Extract kodegen headers from Parts
         let (connection_id, pwd, git_root) = if let Some(parts) = parts {
-            let conn_id = parts.headers.get("x-kodegen-connection-id")
+            let conn_id = parts.headers.get("mcp-session-id")
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string());
 

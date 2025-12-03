@@ -1,6 +1,6 @@
 [package]
 name = "kodegen_mcp_tool"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2024"
 description = "KODEGEN.ᴀɪ: Memory-efficient, Blazing-Fast, MCP tools for code generation agents."
 license = "Apache-2.0 OR MIT"
@@ -67,6 +67,7 @@ cyrup_termcolor = "2"
 # Cross-platform paths (for tool_history)
 dirs = "6"
 kodegen_config = { version = "0.5" }
+kodegen_mcp_schema = { version = "0.5" }
 
 [lib]
 name = "kodegen_mcp_tool"

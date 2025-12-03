@@ -13,6 +13,118 @@ use log;
 
 use crate::error::McpError;
 
+// Re-export ToolArgs from schema package
+pub use kodegen_mcp_schema::ToolArgs;
+
+// ============================================================================
+// TOOL RESPONSE WRAPPER
+// ============================================================================
+
+/// Framework-provided response wrapper for tool outputs.
+///
+/// Tools return `ToolResponse<<Self::Args as ToolArgs>::Output>` from `execute()`.
+/// The output type is DERIVED from Args - tools cannot choose wrong output type.
+///
+/// # Content Layout
+///
+/// - `display`: Human-readable output (Content[0]) - the full output humans see
+/// - `metadata`: Typed, schema-enforced data (Content[1]) - structured metadata
+///
+/// # Example
+///
+/// ```rust
+/// impl Tool for TerminalTool {
+///     type Args = TerminalInput;
+///     // Compiler forces: ToolResponse<TerminalOutput>
+///     // because TerminalInput::Output = TerminalOutput
+///
+///     async fn execute(&self, args: Self::Args, ctx: ToolExecutionContext)
+///         -> Result<ToolResponse<<Self::Args as ToolArgs>::Output>, McpError>
+///     {
+///         let output = run_command(&args.command).await?;
+///         
+///         Ok(ToolResponse::new(
+///             output.stdout,  // Human-readable: full command output
+///             TerminalOutput {
+///                 terminal: Some(args.terminal),
+///                 exit_code: output.exit_code,
+///                 cwd: output.cwd,
+///                 duration_ms: elapsed,
+///                 completed: true,
+///             }
+///         ))
+///     }
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct ToolResponse<M> {
+    /// Human-readable display output - goes to Content[0].
+    ///
+    /// This is the PRIMARY output that humans read:
+    /// - Terminal: the full output of the last command (stdout/stderr)
+    /// - File read: the file contents
+    /// - Search: formatted human-readable results
+    /// - Database query: formatted table output
+    ///
+    /// Always present - every tool has human-readable output.
+    /// Use empty string for tools with no display output.
+    pub display: String,
+
+    /// Typed, schema-enforced metadata - goes to Content[1].
+    ///
+    /// This is SEPARATE from display - NO DUPLICATION.
+    /// Contains only structured data (exit_code, duration_ms, etc.)
+    /// NOT the display content.
+    pub metadata: M,
+}
+
+impl<M> ToolResponse<M> {
+    /// Create response with both display and metadata.
+    ///
+    /// # Arguments
+    /// - `display`: Human-readable output (full command output, file contents, etc.)
+    /// - `metadata`: Typed output struct (derived from Args::Output)
+    #[inline]
+    pub fn new(display: impl Into<String>, metadata: M) -> Self {
+        Self {
+            display: display.into(),
+            metadata,
+        }
+    }
+
+    /// Create response with empty display.
+    ///
+    /// Use when there's no human-readable output but metadata is present.
+    #[inline]
+    pub fn empty_display(metadata: M) -> Self {
+        Self {
+            display: String::new(),
+            metadata,
+        }
+    }
+}
+
+impl<M: Serialize> ToolResponse<M> {
+    /// Convert to `Vec<Content>` for MCP response.
+    ///
+    /// Called by framework in `ToolHandler::call()`. Tools don't call this.
+    ///
+    /// # Content Layout
+    /// - `Content[0]`: Human-readable display (always present, may be empty)
+    /// - `Content[1]`: Typed metadata as pretty-printed JSON
+    pub fn into_contents(self) -> Result<Vec<Content>, serde_json::Error> {
+        let display_content = Content::text(self.display);
+        let json = serde_json::to_string_pretty(&self.metadata)?;
+        let metadata_content = Content::text(json);
+        Ok(vec![display_content, metadata_content])
+    }
+
+    /// Get metadata as JSON Value (for history recording).
+    pub fn metadata_as_json(&self) -> serde_json::Value {
+        serde_json::to_value(&self.metadata).unwrap_or_else(|_| serde_json::json!({}))
+    }
+}
+
 // ============================================================================
 // PERFORMANCE OPTIMIZATIONS
 // ============================================================================
@@ -35,8 +147,11 @@ static SCHEMA_CACHE: std::sync::LazyLock<SchemaCache> =
 /// The trait is generic and knows nothing about specific services.
 /// Every method (except execute/prompt) has a sensible default.
 pub trait Tool: Send + Sync + Sized + 'static {
-    /// Tool execution arguments (auto-generates schema via `JsonSchema`)
-    type Args: DeserializeOwned + Serialize + JsonSchema + Send + 'static;
+    /// Tool execution arguments - ALSO determines output type via ToolArgs::Output.
+    ///
+    /// The output type is DERIVED from Args - tools cannot choose wrong output type.
+    /// This binding is defined in `kodegen-mcp-schema` and enforced at compile time.
+    type Args: ToolArgs;
 
     /// Prompt arguments (what context does teaching need?)
     type PromptArgs: DeserializeOwned + JsonSchema + Send + 'static;
@@ -118,11 +233,32 @@ pub trait Tool: Send + Sync + Sized + 'static {
         schema
     }
 
-    /// Output schema (optional, rarely needed)
+    /// Output schema - AUTO-GENERATED from `<Args as ToolArgs>::Output`.
+    ///
+    /// Unlike input_schema which is optional to override, output_schema is
+    /// always derived from the Args→Output mapping in the schema package.
+    /// This ensures compile-time enforcement of correct output types.
     #[must_use]
     #[inline]
-    fn output_schema() -> Option<std::sync::Arc<serde_json::Map<String, Value>>> {
-        None
+    fn output_schema() -> std::sync::Arc<serde_json::Map<String, Value>> {
+        // Use a separate cache namespace for output schemas
+        static OUTPUT_SCHEMA_CACHE: std::sync::LazyLock<SchemaCache> =
+            std::sync::LazyLock::new(|| parking_lot::RwLock::new(HashMap::new()));
+
+        let name = Self::name();
+        let cache_key = Box::leak(format!("{}_output", name).into_boxed_str());
+
+        // Fast path: read from cache
+        if let Some(schema) = OUTPUT_SCHEMA_CACHE.read().get(cache_key) {
+            return schema.clone();
+        }
+
+        // Slow path: generate and cache from Args::Output
+        let schema = std::sync::Arc::new(
+            schema_for_type::<<Self::Args as ToolArgs>::Output>()
+        );
+        OUTPUT_SCHEMA_CACHE.write().insert(cache_key, schema.clone());
+        schema
     }
 
     // ========================================================================
@@ -183,15 +319,34 @@ pub trait Tool: Send + Sync + Sized + 'static {
     // EXECUTION (Required)
     // ========================================================================
 
-    /// Execute the tool with given arguments
+    /// Execute the tool with given arguments.
     ///
-    /// This is where the actual work happens.
-    /// Since tools are structs holding their dependencies, we use &self.
+    /// Return type is `ToolResponse<<Self::Args as ToolArgs>::Output>`.
+    /// The output type is DERIVED from Args - compiler enforces correct type.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// impl Tool for TerminalTool {
+    ///     type Args = TerminalInput;
+    ///     // TerminalInput::Output = TerminalOutput (defined in schema)
+    ///     // So execute() MUST return ToolResponse<TerminalOutput>
+    ///
+    ///     async fn execute(&self, args: Self::Args, ctx: ToolExecutionContext)
+    ///         -> Result<ToolResponse<TerminalOutput>, McpError>
+    ///     {
+    ///         Ok(ToolResponse::new(output_text, TerminalOutput { ... }))
+    ///     }
+    /// }
+    /// ```
     fn execute(
         &self,
         args: Self::Args,
         ctx: ToolExecutionContext,
-    ) -> impl std::future::Future<Output = Result<Vec<Content>, McpError>> + Send;
+    ) -> impl std::future::Future<Output = Result<
+        ToolResponse<<Self::Args as ToolArgs>::Output>,
+        McpError
+    >> + Send;
 
     // ========================================================================
     // PROMPTING (Required - agents need this!)
@@ -256,7 +411,7 @@ pub trait Tool: Send + Sync + Sized + 'static {
             title: None,
             description: Some(Self::description().into()),
             input_schema: Self::input_schema(),
-            output_schema: Self::output_schema(),
+            output_schema: Some(Self::output_schema()),
             annotations: Some(annotations),
             icons: None,
             meta: None,
@@ -339,7 +494,7 @@ pub trait Tool: Send + Sync + Sized + 'static {
             title: None,
             description: Some(Self::description().into()),
             input_schema: Self::input_schema(),
-            output_schema: Self::output_schema(),
+            output_schema: Some(Self::output_schema()),
             annotations: Some(annotations),
             icons: None,
             meta: None,
@@ -699,35 +854,51 @@ where
             let args_json = serde_json::to_value(&args)
                 .unwrap_or_else(|_| serde_json::json!({}));
 
-            // Execute tool
+            // Execute tool - returns ToolResponse<<T::Args as ToolArgs>::Output>
             let result = self.tool.execute(args, exec_ctx).await;
             let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
-            // Convert result to JSON for history
-            let output_json = match &result {
-                Ok(contents) => serde_json::json!({
-                    "content_blocks": contents.len(),
-                    "preview": contents.first().map(|c| format!("{:?}", c))
-                }),
-                Err(e) => serde_json::json!({
-                    "error": e.to_string(),
-                    "is_error": true
-                }),
-            };
+            match result {
+                Ok(response) => {
+                    // Get typed metadata as JSON for history
+                    let output_json = response.metadata_as_json();
+                    
+                    // Convert ToolResponse to Vec<Content>
+                    let contents = response.into_contents()
+                        .map_err(|e| rmcp::ErrorData::internal_error(
+                            format!("Failed to serialize tool output: {}", e),
+                            None
+                        ))?;
 
-            // Record to history
-            if let Some(history) = crate::tool_history::get_global_history() {
-                history.add_call(
-                    T::name().to_string(),
-                    args_json,
-                    output_json,
-                    Some(duration_ms),
-                );
+                    // Record to history
+                    if let Some(history) = crate::tool_history::get_global_history() {
+                        history.add_call(
+                            T::name().to_string(),
+                            args_json,
+                            output_json,
+                            Some(duration_ms),
+                        );
+                    }
+
+                    Ok(CallToolResult::success(contents))
+                }
+                Err(e) => {
+                    // Record error to history
+                    let error_json = serde_json::json!({
+                        "error": e.to_string(),
+                        "is_error": true
+                    });
+                    if let Some(history) = crate::tool_history::get_global_history() {
+                        history.add_call(
+                            T::name().to_string(),
+                            args_json,
+                            error_json,
+                            Some(duration_ms),
+                        );
+                    }
+                    Err(rmcp::ErrorData::from(e))
+                }
             }
-
-            // Return formatted content
-            let contents = result.map_err(rmcp::ErrorData::from)?;
-            Ok(CallToolResult::success(contents))
         })
     }
 }

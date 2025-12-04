@@ -23,11 +23,11 @@ pub struct ToolCallRecord {
     /// Name of the tool that was called
     pub tool_name: String,
 
-    /// Arguments passed to the tool (as JSON)
-    pub arguments: serde_json::Value,
+    /// Arguments passed to the tool (serialized JSON string)
+    pub args_json: String,
 
-    /// Output returned by the tool (as JSON)
-    pub output: serde_json::Value,
+    /// Output returned by the tool (serialized JSON string)
+    pub output_json: String,
 
     /// Execution duration in milliseconds
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -101,11 +101,17 @@ impl ToolHistory {
         output: serde_json::Value,
         duration_ms: Option<u64>,
     ) {
+        // Serialize Value → String immediately (single allocation per field)
+        let args_json = serde_json::to_string(&arguments)
+            .unwrap_or_else(|_| "{}".to_string());
+        let output_json = serde_json::to_string(&output)
+            .unwrap_or_else(|_| "{}".to_string());
+
         let record = ToolCallRecord {
             timestamp: Utc::now().to_rfc3339(),
             tool_name,
-            arguments,
-            output,
+            args_json,
+            output_json,
             duration_ms,
         };
 
